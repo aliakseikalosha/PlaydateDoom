@@ -1,0 +1,33 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build: device (Release)",
+      "type": "shell",
+      "command": "./build.sh device Release",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": "$gcc"
+    },
+    {
+      "label": "Build: device (Debug)",
+      "type": "shell",
+      "command": "./build.sh device Debug",
+      "group": "build",
+      "problemMatcher": "$gcc"
+    },
+    {
+      "label": "Build: simulator (Debug)",
+      "type": "shell",
+      "command": "./build.sh sim Debug",
+      "group": "build",
+      "problemMatcher": "$gcc"
+    },
+    {
+      "label": "Install on device (USB)",
+      "type": "shell",
+      "dependsOn": "Build: device (Release)",
+      "command": "PD=$(ls /dev/cu.usbmodemPD* | head -n 1) && \"$PLAYDATE_SDK_PATH/bin/pdutil\" \"$PD\" install \"${workspaceFolder}/doom_DEVICE.pdx\"",
+      "problemMatcher": []
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug in Playdate Simulator",
+      "type": "lldb",
+      "request": "launch",
+      "preLaunchTask": "Build: simulator (Debug)",
+      "program": "${env:PLAYDATE_SDK_PATH}/bin/Playdate Simulator.app/Contents/MacOS/Playdate Simulator",
+      "args": ["${workspaceFolder}/doom.pdx"],
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}

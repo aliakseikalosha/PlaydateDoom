@@ -1,0 +1,6 @@
+name=DOOM
+author=Aliaksei Kalosha
+description=port of Doom on Playdate base on ozkl (doomgeneric)
+bundleID=com.aliakseikalosha.doom
+version=0.1
+buildNumber=1

@@ -1,0 +1,4 @@
+build*/
+Source/pdex.*
+*.pdx
+Source/*.wad
