@@ -2,6 +2,8 @@
 //
 // Video:   Doom's 320x240 8-bit frame is ordered-dithered to 1 bit and centred
 //          in the 400x240 display (full height; only left/right bars remain).
+//          The same 2x2 banded ordered dither (see dither_masks below) is
+//          used everywhere - 3D view, automap, status bar, messages, menus.
 // Input:   D-pad moves/turns, A fires, B uses. The crank turns. With the crank
 //          extended the D-pad's left/right strafe instead of turning. Hold B
 //          and tap left/right to cycle weapons. In menus/intermissions A is
@@ -34,19 +36,14 @@ extern boolean messageNeedsInput;
 
 // ---------------------------------------------------------------- video
 
-static const uint8_t bayer8[8][8] = {
-    { 0, 32,  8, 40,  2, 34, 10, 42},
-    {48, 16, 56, 24, 50, 18, 58, 26},
-    {12, 44,  4, 36, 14, 46,  6, 38},
-    {60, 28, 52, 20, 62, 30, 54, 22},
-    { 3, 35, 11, 43,  1, 33,  9, 41},
-    {51, 19, 59, 27, 49, 17, 57, 25},
-    {15, 47,  7, 39, 13, 45,  5, 37},
-    {63, 31, 55, 23, 61, 29, 53, 21},
-};
+// 2x2 ordered-dither mask per intensity band (0-19%, 20-39%, 40-59%,
+// 60-88%, 89-100%). Bits are corners TL,TR,BL,BR (MSB to LSB), e.g.
+// 0x8 = "10/00" (only the top-left corner lit). A pixel's colour is decided
+// by whether its own screen position, taken mod 2 in x and y, lands on a lit
+// corner of its colour's mask.
+static const uint8_t dither_mask[5] = {0x0, 0x8, 0x9, 0x7, 0xF};
 
-static uint8_t luma[256];
-static uint8_t threshold[8][8];
+static uint8_t level[256]; // intensity band (0-4) for each palette colour
 
 static void build_luma(void)
 {
@@ -55,21 +52,19 @@ static void build_luma(void)
     for (i = 0; i < 256; i++)
     {
         int y = (colors[i].r * 77 + colors[i].g * 150 + colors[i].b * 29) >> 8;
+        int pct;
 
         // Doom's lighting is dark for a 1-bit panel; lift the mid-tones.
         y = (y + (int) sqrtf((float) (y * 255))) >> 1;
-        luma[i] = (uint8_t) y;
+
+        pct = y * 100 / 255;
+        level[i] = (uint8_t) (pct < 20 ? 0 : pct < 40 ? 1 : pct < 60 ? 2 : pct < 89 ? 3 : 4);
     }
 }
 
 void DG_Init(void)
 {
     PlaydateAPI *pd = pd_glue_api();
-    int x, y;
-
-    for (y = 0; y < 8; y++)
-        for (x = 0; x < 8; x++)
-            threshold[y][x] = (uint8_t) (bayer8[y][x] * 4 + 2);
 
     pd->graphics->clear(kColorBlack);
 }
@@ -89,19 +84,24 @@ void DG_DrawFrame(void)
 
     for (y = 0; y < DOOMGENERIC_RESY; y++)
     {
-        const uint8_t *th = threshold[y & 7];
         uint8_t *dst = frame + (VIEW_Y + y) * LCD_ROWBYTES + VIEW_X_BYTES;
+        // A pixel is white iff (x%2, y%2) lands on a lit corner of its
+        // colour's mask: row y%2 picks TL/TR (y even) or BL/BR (y odd),
+        // column x%2 then picks the left (even x) or right (odd x) bit.
+        int fine_y = y & 1;
+        uint8_t bitEvenX = fine_y ? 0x2 : 0x8; // BL : TL
+        uint8_t bitOddX  = fine_y ? 0x1 : 0x4; // BR : TR
 
         for (bx = 0; bx < DOOMGENERIC_RESX / 8; bx++)
         {
-            dst[bx] = (uint8_t) ((luma[src[0]] > th[0] ? 0x80 : 0) |
-                                 (luma[src[1]] > th[1] ? 0x40 : 0) |
-                                 (luma[src[2]] > th[2] ? 0x20 : 0) |
-                                 (luma[src[3]] > th[3] ? 0x10 : 0) |
-                                 (luma[src[4]] > th[4] ? 0x08 : 0) |
-                                 (luma[src[5]] > th[5] ? 0x04 : 0) |
-                                 (luma[src[6]] > th[6] ? 0x02 : 0) |
-                                 (luma[src[7]] > th[7] ? 0x01 : 0));
+            dst[bx] = (uint8_t) ((dither_mask[level[src[0]]] & bitEvenX ? 0x80 : 0) |
+                                 (dither_mask[level[src[1]]] & bitOddX  ? 0x40 : 0) |
+                                 (dither_mask[level[src[2]]] & bitEvenX ? 0x20 : 0) |
+                                 (dither_mask[level[src[3]]] & bitOddX  ? 0x10 : 0) |
+                                 (dither_mask[level[src[4]]] & bitEvenX ? 0x08 : 0) |
+                                 (dither_mask[level[src[5]]] & bitOddX  ? 0x04 : 0) |
+                                 (dither_mask[level[src[6]]] & bitEvenX ? 0x02 : 0) |
+                                 (dither_mask[level[src[7]]] & bitOddX  ? 0x01 : 0));
             src += 8;
         }
     }
