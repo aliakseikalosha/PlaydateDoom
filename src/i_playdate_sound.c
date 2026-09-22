@@ -267,24 +267,64 @@ sound_module_t DG_sound_module = {
 };
 
 // ---- Music ----
+//
+// PDSynthInstrument turned out to be non-functional on this device/firmware
+// (3.1.2): newInstrument()/addVoice()/setInstrument() all report success,
+// but nothing is ever audible, whether driven directly via
+// instrument->playNote() or via a SoundSequence/SequenceTrack built with
+// addNoteEvent() (which also sidesteps sequence->loadMIDIFile(), separately
+// confirmed broken for runtime-written files - see git history). A plain
+// PDSynth's own synth->playNote() DOES work, including scheduled for the
+// future via the `when` parameter (confirmed on-device). So music here is a
+// from-scratch scheduler: MUS is converted to MIDI (mus2mid) and walked once
+// into a flat note list, then played back by handing plain PDSynth voices to
+// synth->playNote() with sample-accurate `when` timestamps, a little ahead
+// of when each note is actually due (see MUSIC_LOOKAHEAD_SAMPLES), polled
+// once per game tic via the music_module_t Poll hook.
 
-// MIDI only has 16 channels, and Playdate's MIDI loader gives each channel
-// that's actually used its own SequenceTrack, so 16 covers any song.
+// MIDI channels 0-15, indexed directly. Channel 9 (percussion) is dropped -
+// its notes would come out as random pitched beeps through a plain waveform
+// synth.
 #define MUSIC_MAX_TRACKS 16
-#define MUSIC_VOICES 2
-#define MUSIC_PATH "music.mid"
-#define MUSIC_GAIN 0.45f
+#define MUSIC_VOICES 4 // synths per channel, round-robined for light overlap
+#define MUSIC_GAIN 0.5f
+// MUS's native tick rate (and what mus2mid's fixed 70-tick/quarter-note,
+// assumed-120bpm header amounts to); using it 1:1 as our step rate means we
+// don't need any MIDI tempo-meta handling at all.
+#define MUSIC_STEPS_PER_SECOND 140.0f
+#define MUSIC_SAMPLE_RATE 44100
+// How far ahead of actual playback time notes are hg->synth->playNote()'d.
+// Generous relative to the ~28ms poll interval (35 ticspersec) so polling
+// jitter/hiccups never starve the schedule.
+#define MUSIC_LOOKAHEAD_SAMPLES (MUSIC_SAMPLE_RATE / 2) // 0.5s
 
-// Every track of the currently-playing song gets its own instrument (and its
-// own synths). Sharing one instrument across two tracks of the same sequence
-// crashed the device (see i_playdate_sound.c history) - the sound engine
-// apparently doesn't expect one PDSynthInstrument to be driven by two tracks
-// at once. These are torn down in PD_UnRegisterSong.
-static PDSynthInstrument *song_instruments[MUSIC_MAX_TRACKS];
-static PDSynth *song_synths[MUSIC_MAX_TRACKS][MUSIC_VOICES];
-static int song_track_count;
+typedef struct
+{
+    uint32_t start_tick;
+    uint32_t length_ticks;
+    uint8_t channel;
+    uint8_t note;
+    uint8_t velocity;
+} music_note_t;
 
-static SoundSequence *sequence;
+typedef struct
+{
+    music_note_t *notes;
+    int count;
+    uint32_t total_ticks;
+} music_song_t;
+
+// One small pool of synths per channel, created lazily and reused for the
+// life of the game (not per song - a plain PDSynth, unlike the broken
+// PDSynthInstrument, has no per-song state to rebuild).
+static PDSynth *channel_synth[MUSIC_MAX_TRACKS][MUSIC_VOICES];
+static int channel_next_voice[MUSIC_MAX_TRACKS];
+
+static music_song_t *current_song;
+static uint32_t play_base_time;  // sample time corresponding to song tick 0
+static uint32_t pause_start_time;
+static int play_next_index;      // index of the next not-yet-scheduled note
+static int play_active;
 static int music_looping;
 static int music_volume = 127;
 static int music_enabled = 1;
@@ -294,84 +334,48 @@ static void ApplyMusicVolume(void)
 {
     PlaydateAPI *pd = pd_glue_api();
     float v = MUSIC_GAIN * music_volume / 127.0f;
-    int i;
+    int c, i;
 
-    for (i = 0; i < song_track_count; ++i)
-        if (song_instruments[i] != NULL)
-            pd->sound->instrument->setVolume(song_instruments[i], v, v);
+    for (c = 0; c < MUSIC_MAX_TRACKS; ++c)
+        for (i = 0; i < MUSIC_VOICES; ++i)
+            if (channel_synth[c][i] != NULL)
+                pd->sound->synth->setVolume(channel_synth[c][i], v, v);
 }
 
-// Frees any instruments/synths left over from the previous song.
-static void FreeSongInstruments(void)
-{
-    PlaydateAPI *pd = pd_glue_api();
-    int i, v;
-
-    for (i = 0; i < song_track_count; ++i)
-    {
-        for (v = 0; v < MUSIC_VOICES; ++v)
-        {
-            if (song_synths[i][v] != NULL)
-                pd->sound->synth->freeSynth(song_synths[i][v]);
-            song_synths[i][v] = NULL;
-        }
-        if (song_instruments[i] != NULL)
-            pd->sound->instrument->freeInstrument(song_instruments[i]);
-        song_instruments[i] = NULL;
-    }
-    song_track_count = 0;
-}
-
-// One fresh instrument (with its own synths) per track, sized to this song.
-static void CreateSongInstruments(int tracks)
+// Lazily creates a channel's voice pool, then round-robins across it so an
+// overlapping note doesn't always cut off the immediately preceding one.
+static PDSynth *GetChannelVoice(PlaydateAPI *pd, int channel)
 {
     static const SoundWaveform waves[4] = {kWaveformSquare, kWaveformSawtooth,
                                             kWaveformTriangle, kWaveformSine};
-    PlaydateAPI *pd = pd_glue_api();
-    int i, v;
+    int i, slot;
 
-    FreeSongInstruments();
+    if (channel < 0 || channel >= MUSIC_MAX_TRACKS)
+        return NULL;
 
-    if (tracks > MUSIC_MAX_TRACKS)
-        tracks = MUSIC_MAX_TRACKS;
-    song_track_count = tracks;
-
-    for (i = 0; i < tracks; ++i)
+    if (channel_synth[channel][0] == NULL)
     {
-        song_instruments[i] = pd->sound->instrument->newInstrument();
-        if (song_instruments[i] == NULL)
-            continue;
+        float v = MUSIC_GAIN * music_volume / 127.0f;
 
-        for (v = 0; v < MUSIC_VOICES; ++v)
+        for (i = 0; i < MUSIC_VOICES; ++i)
         {
             PDSynth *synth = pd->sound->synth->newSynth();
 
-            song_synths[i][v] = synth;
+            channel_synth[channel][i] = synth;
             if (synth == NULL)
                 continue;
-
-            pd->sound->synth->setWaveform(synth, waves[i % 4]);
-            pd->sound->synth->setAttackTime(synth, 0.01f);
-            pd->sound->synth->setDecayTime(synth, 0.1f);
-            pd->sound->synth->setSustainLevel(synth, 0.6f);
-            pd->sound->synth->setReleaseTime(synth, 0.1f);
-            pd->sound->instrument->addVoice(song_instruments[i], synth, 0, 127, 0);
+            pd->sound->synth->setWaveform(synth, waves[channel % 4]);
+            pd->sound->synth->setAttackTime(synth, 0.005f);
+            pd->sound->synth->setDecayTime(synth, 0.03f);
+            pd->sound->synth->setSustainLevel(synth, 0.7f);
+            pd->sound->synth->setReleaseTime(synth, 0.03f);
+            pd->sound->synth->setVolume(synth, v, v);
         }
     }
-    ApplyMusicVolume();
-}
 
-static size_t PutVarLen(uint8_t *out, uint32_t v)
-{
-    uint8_t tmp[5];
-    size_t n = 0, i;
-
-    tmp[n++] = v & 0x7f;
-    while ((v >>= 7) != 0)
-        tmp[n++] = (v & 0x7f) | 0x80;
-    for (i = 0; i < n; ++i)
-        out[i] = tmp[n - 1 - i];
-    return n;
+    slot = channel_next_voice[channel] % MUSIC_VOICES;
+    channel_next_voice[channel]++;
+    return channel_synth[channel][slot];
 }
 
 static uint32_t GetVarLen(const uint8_t *in, size_t n, size_t *p)
@@ -389,31 +393,60 @@ static uint32_t GetVarLen(const uint8_t *in, size_t n, size_t *p)
     return v;
 }
 
-// Rewrite a single-track MIDI file without the percussion channel (10), whose
-// notes would otherwise come out as random pitched beeps. Returns the new
-// length, or 0 if the data isn't the expected layout.
-static size_t StripPercussion(const uint8_t *in, size_t n, uint8_t *out)
+static void AddNote(music_song_t *song, uint32_t start, uint32_t length, uint8_t channel,
+                     uint8_t note, uint8_t vel)
 {
-    size_t p = 22, o = 22;
-    uint32_t pending = 0;
-    uint8_t running = 0;
+    if (song->count >= 0 && (song->count & (song->count - 1)) == 0)
+    {
+        // count is 0 or a power of two: grow (amortised doubling; count==0
+        // allocates the first 1-entry block).
+        int newcap = song->count ? song->count * 2 : 1;
+        music_note_t *bigger = realloc(song->notes, newcap * sizeof(music_note_t));
 
-    if (n < 22 || memcmp(in, "MThd", 4) != 0 || memcmp(in + 14, "MTrk", 4) != 0)
-        return 0;
-    memcpy(out, in, 22);
+        if (bigger == NULL)
+            return;
+        song->notes = bigger;
+    }
+    song->notes[song->count].start_tick = start;
+    song->notes[song->count].length_ticks = length;
+    song->notes[song->count].channel = channel;
+    song->notes[song->count].note = note;
+    song->notes[song->count].velocity = vel;
+    song->count++;
+    if (start + length > song->total_ticks)
+        song->total_ticks = start + length;
+}
+
+// Walks the MIDI byte stream mus2mid produced into a flat, time-ordered note
+// list (see the big comment above this section for why this isn't just fed
+// to sequence->loadMIDIFile()).
+static void ParseMIDIIntoSong(music_song_t *song, const uint8_t *midi, size_t n)
+{
+    // Per-(channel, note) step a currently-held note started at, or -1.
+    static int32_t note_start[MUSIC_MAX_TRACKS][128];
+    static uint8_t note_vel[MUSIC_MAX_TRACKS][128];
+    size_t p = 22; // MThd (14 bytes) + MTrk header (8 bytes), per mus2mid.c
+    uint32_t step = 0;
+    uint8_t running = 0;
+    int c, note;
+
+    if (n < 22 || memcmp(midi, "MThd", 4) != 0 || memcmp(midi + 14, "MTrk", 4) != 0)
+        return;
+
+    for (c = 0; c < MUSIC_MAX_TRACKS; ++c)
+        for (note = 0; note < 128; ++note)
+            note_start[c][note] = -1;
 
     while (p < n)
     {
-        uint32_t delta = GetVarLen(in, n, &p);
+        uint32_t delta = GetVarLen(midi, n, &p);
         uint8_t status;
-        size_t start, len;
-        int keep = 1;
 
         if (p >= n)
             break;
-        pending += delta;
+        step += delta;
 
-        status = in[p];
+        status = midi[p];
         if (status >= 0x80)
         {
             p++;
@@ -425,43 +458,134 @@ static size_t StripPercussion(const uint8_t *in, size_t n, uint8_t *out)
             status = running;
         }
 
-        start = p;
         if (status == 0xff)
         {
-            p++; // meta type
-            len = GetVarLen(in, n, &p);
+            uint32_t len;
+
+            p++; // meta type, unused
+            len = GetVarLen(midi, n, &p);
             p += len;
         }
         else if (status == 0xf0 || status == 0xf7)
         {
-            len = GetVarLen(in, n, &p);
+            uint32_t len = GetVarLen(midi, n, &p);
+
             p += len;
+        }
+        else if (status >= 0x80)
+        {
+            uint8_t hi = status & 0xf0;
+            uint8_t ch = status & 0x0f;
+
+            if (hi == 0xc0 || hi == 0xd0) // program change / channel pressure: 1 data byte
+            {
+                p += 1;
+            }
+            else // note on/off, controller, pitch bend: 2 data bytes
+            {
+                uint8_t d1 = (p < n) ? midi[p] : 0;
+                uint8_t d2 = (p + 1 < n) ? midi[p + 1] : 0;
+
+                p += 2;
+                if (ch != 9 && (hi == 0x90 || hi == 0x80))
+                {
+                    uint8_t note_num = d1 & 0x7f;
+
+                    if (hi == 0x90 && d2 > 0) // note on
+                    {
+                        note_start[ch][note_num] = (int32_t)step;
+                        note_vel[ch][note_num] = d2;
+                    }
+                    else // note off, or note-on with velocity 0
+                    {
+                        int32_t start = note_start[ch][note_num];
+
+                        if (start >= 0)
+                        {
+                            uint32_t length = step - (uint32_t)start;
+
+                            if (length < 1)
+                                length = 1;
+                            AddNote(song, (uint32_t)start, length, ch, note_num, note_vel[ch][note_num]);
+                            note_start[ch][note_num] = -1;
+                        }
+                    }
+                }
+            }
         }
         else
         {
-            uint8_t hi = status & 0xf0;
-
-            p += (hi == 0xc0 || hi == 0xd0) ? 1 : 2;
-            keep = (status & 0x0f) != 9;
-        }
-        if (p > n)
-            break;
-
-        if (keep)
-        {
-            o += PutVarLen(out + o, pending);
-            out[o++] = status;
-            memcpy(out + o, in + start, p - start);
-            o += p - start;
-            pending = 0;
+            break; // stray data byte with no status yet: malformed, bail out
         }
     }
+}
 
-    out[18] = (o - 22) >> 24;
-    out[19] = (o - 22) >> 16;
-    out[20] = (o - 22) >> 8;
-    out[21] = (o - 22);
-    return o;
+static uint32_t TickToSample(uint32_t tick)
+{
+    return (uint32_t)((uint64_t)tick * MUSIC_SAMPLE_RATE / (uint32_t)MUSIC_STEPS_PER_SECOND);
+}
+
+// Schedules any notes due within the lookahead window, and handles
+// end-of-song/looping. Called once per game tic (see music_module_t::Poll)
+// and once immediately from PD_PlaySong to seed the initial window.
+static void PD_PollMusic(void)
+{
+    PlaydateAPI *pd = pd_glue_api();
+    uint32_t now, horizon, song_end;
+
+    if (!play_active || current_song == NULL || music_paused || !music_enabled)
+        return;
+
+    now = pd->sound->getCurrentTime();
+    horizon = now + MUSIC_LOOKAHEAD_SAMPLES;
+
+    while (play_next_index < current_song->count)
+    {
+        music_note_t *n = &current_song->notes[play_next_index];
+        uint32_t when = play_base_time + TickToSample(n->start_tick);
+        PDSynth *voice;
+
+        if (when > horizon)
+            break;
+
+        voice = GetChannelVoice(pd, n->channel);
+        if (voice != NULL)
+        {
+            float freq = pd_noteToFrequency((float)n->note);
+            float len_seconds = (float)n->length_ticks / MUSIC_STEPS_PER_SECOND;
+
+            pd->sound->synth->playNote(voice, freq, n->velocity / 127.0f, len_seconds, when);
+        }
+        play_next_index++;
+    }
+
+    if (play_next_index >= current_song->count)
+    {
+        song_end = play_base_time + TickToSample(current_song->total_ticks);
+        if (now >= song_end)
+        {
+            if (music_looping)
+            {
+                play_base_time = song_end;
+                play_next_index = 0;
+            }
+            else
+            {
+                play_active = 0;
+            }
+        }
+    }
+}
+
+static void SilenceAllChannels(void)
+{
+    PlaydateAPI *pd = pd_glue_api();
+    int c, i;
+
+    for (c = 0; c < MUSIC_MAX_TRACKS; ++c)
+        for (i = 0; i < MUSIC_VOICES; ++i)
+            if (channel_synth[c][i] != NULL)
+                pd->sound->synth->noteOff(channel_synth[c][i], 0);
 }
 
 static boolean PD_InitMusic(void)
@@ -471,9 +595,8 @@ static boolean PD_InitMusic(void)
 
 static void PD_ShutdownMusic(void)
 {
-    if (sequence != NULL)
-        pd_glue_api()->sound->sequence->stop(sequence);
-    FreeSongInstruments();
+    play_active = 0;
+    SilenceAllChannels();
 }
 
 static void PD_SetMusicVolume(int volume)
@@ -484,28 +607,30 @@ static void PD_SetMusicVolume(int volume)
 
 static void PD_PauseMusic(void)
 {
+    if (music_paused)
+        return;
     music_paused = 1;
-    if (sequence != NULL)
-        pd_glue_api()->sound->sequence->stop(sequence);
+    pause_start_time = pd_glue_api()->sound->getCurrentTime();
+    SilenceAllChannels();
 }
 
 static void PD_ResumeMusic(void)
 {
+    if (!music_paused)
+        return;
     music_paused = 0;
-    if (sequence != NULL && music_enabled)
-        pd_glue_api()->sound->sequence->play(sequence, NULL, NULL);
+    // Shift the song's timeline forward by exactly how long we were paused,
+    // so playback resumes where it left off instead of firing a burst of
+    // "overdue" notes.
+    play_base_time += pd_glue_api()->sound->getCurrentTime() - pause_start_time;
 }
 
 static void *PD_RegisterSong(void *data, int len)
 {
-    PlaydateAPI *pd = pd_glue_api();
     MEMFILE *in, *out;
     void *midi;
-    size_t midilen, outlen;
-    uint8_t *filtered;
-    SDFile *f;
-    SoundSequence *seq;
-    int i, tracks;
+    size_t midilen;
+    music_song_t *song;
 
     in = mem_fopen_read(data, len);
     out = mem_fopen_write();
@@ -518,146 +643,78 @@ static void *PD_RegisterSong(void *data, int len)
     }
     mem_get_buf(out, &midi, &midilen);
 
-    filtered = malloc(midilen * 2 + 64);
-    outlen = filtered ? StripPercussion(midi, midilen, filtered) : 0;
+    song = malloc(sizeof(*song));
+    if (song == NULL)
+    {
+        mem_fclose(in);
+        mem_fclose(out);
+        return NULL;
+    }
+    song->notes = NULL;
+    song->count = 0;
+    song->total_ticks = 0;
+    ParseMIDIIntoSong(song, midi, midilen);
+    DiagLog("parsed %d-byte song (len=%d) into %d notes, %u ticks (%.1fs @ %d/s)",
+            (int)midilen, len, song->count, song->total_ticks,
+            (double)(song->total_ticks / MUSIC_STEPS_PER_SECOND), (int)MUSIC_STEPS_PER_SECOND);
+
     mem_fclose(in);
-    if (outlen == 0)
-    {
-        DiagLog("StripPercussion failed (midilen=%d)", (int)midilen);
-        free(filtered);
-        mem_fclose(out);
-        return NULL;
-    }
-
-    f = pd->file->open(MUSIC_PATH, kFileWrite);
-    if (f == NULL)
-    {
-        DiagLog("could not open %s for write: %s", MUSIC_PATH, pd->file->geterr());
-        free(filtered);
-        mem_fclose(out);
-        return NULL;
-    }
-    pd->file->write(f, filtered, outlen);
-    pd->file->close(f);
-    free(filtered);
     mem_fclose(out);
-
-    // NOTE: as of SDK/firmware 3.1.2, loadMIDIFile() below reliably fails
-    // (returns 0) for every file tested here, including a trivial hand-built
-    // MIDI file written to the Data directory the same way - not just our
-    // generated ones - which points at loadMIDIFile() only finding files
-    // bundled into the .pdx at compile time, not ones written at runtime.
-    // Until that's confirmed/resolved this path always ends in "no music",
-    // same as before this feature existed, but importantly no longer
-    // crashes (see the comment on the missing pd->sound->getError() call
-    // below - calling it here reliably hard-faulted the device).
-    seq = pd->sound->sequence->newSequence();
-    if (!pd->sound->sequence->loadMIDIFile(seq, MUSIC_PATH))
-    {
-        // Do not call pd->sound->getError() here - see note above the
-        // NOTE this function's comment references was written from: it
-        // consistently hard-faults the device (Error e0) on this firmware.
-        DiagLog("loadMIDIFile failed for %s", MUSIC_PATH);
-        pd->sound->sequence->freeSequence(seq);
-        return NULL;
-    }
-
-    tracks = pd->sound->sequence->getTrackCount(seq);
-    DiagLog("loaded %s, %d bytes, %d track(s), length %d steps",
-            MUSIC_PATH, (int)outlen, tracks, (int)pd->sound->sequence->getLength(seq));
-
-    // Every track gets its own instrument: two tracks of the same sequence
-    // sharing one instrument previously crashed the device (see comment on
-    // song_instruments above).
-    CreateSongInstruments(tracks);
-    for (i = 0; i < tracks && i < MUSIC_MAX_TRACKS; ++i)
-    {
-        SequenceTrack *track = pd->sound->sequence->getTrackAtIndex(seq, i);
-
-        if (track != NULL && song_instruments[i] != NULL)
-            pd->sound->track->setInstrument(track, song_instruments[i]);
-    }
-
-    sequence = seq;
-    return seq;
+    return song;
 }
 
 static void PD_UnRegisterSong(void *handle)
 {
-    PlaydateAPI *pd = pd_glue_api();
+    music_song_t *song = handle;
 
-    if (handle == NULL)
+    if (song == NULL)
         return;
-
-    pd->sound->sequence->stop(handle);
-    pd->sound->sequence->allNotesOff(handle);
-    pd->sound->sequence->freeSequence(handle);
-    if (sequence == handle)
-        sequence = NULL;
-    FreeSongInstruments();
-}
-
-// Called on the audio thread when a song reaches its end. Looping is
-// implemented by hand (rewind + replay) instead of sequence->setLoops():
-// setLoops(seq, 0, getLength(seq), 0) reliably hard-faulted the device the
-// moment a level's (looping) music started - see i_playdate_sound.c history -
-// while non-looping intro/menu music, which never calls setLoops, was fine.
-static void SequenceFinished(SoundSequence *seq, void *userdata)
-{
-    PlaydateAPI *pd = pd_glue_api();
-
-    (void)userdata;
-    if (seq != sequence || !music_looping || !music_enabled || music_paused)
-        return;
-
-    pd->sound->sequence->setTime(seq, 0);
-    pd->sound->sequence->play(seq, SequenceFinished, NULL);
+    if (current_song == song)
+    {
+        play_active = 0;
+        current_song = NULL;
+        SilenceAllChannels();
+    }
+    free(song->notes);
+    free(song);
 }
 
 static void PD_PlaySong(void *handle, boolean looping)
 {
-    PlaydateAPI *pd = pd_glue_api();
+    music_song_t *song = handle;
 
-    if (handle == NULL)
+    if (song == NULL)
         return;
 
+    current_song = song;
     music_looping = looping;
     music_paused = 0;
-    pd->sound->sequence->setTime(handle, 0);
-    if (music_enabled)
-        pd->sound->sequence->play(handle, SequenceFinished, NULL);
-    pd->system->logToConsole("i_playdate_sound: PlaySong enabled=%d looping=%d isPlaying=%d vol=%d",
-                              music_enabled, looping, pd->sound->sequence->isPlaying(handle),
-                              music_volume);
+    play_base_time = pd_glue_api()->sound->getCurrentTime();
+    play_next_index = 0;
+    play_active = 1;
+    PD_PollMusic(); // seed the initial lookahead window immediately
+    DiagLog("PlaySong: %d notes, looping=%d enabled=%d musicvol=%d",
+            song->count, looping, music_enabled, music_volume);
 }
 
 static void PD_StopSong(void)
 {
-    if (sequence != NULL)
-        pd_glue_api()->sound->sequence->stop(sequence);
+    play_active = 0;
+    current_song = NULL;
+    SilenceAllChannels();
 }
 
 static boolean PD_MusicIsPlaying(void)
 {
-    return sequence != NULL && pd_glue_api()->sound->sequence->isPlaying(sequence);
+    return play_active;
 }
 
 // System-menu toggle.
 void dgpd_SetMusicEnabled(int on)
 {
     music_enabled = on;
-    if (sequence == NULL)
-        return;
-
     if (!on)
-    {
-        pd_glue_api()->sound->sequence->stop(sequence);
-        pd_glue_api()->sound->sequence->allNotesOff(sequence);
-    }
-    else if (!music_paused)
-    {
-        pd_glue_api()->sound->sequence->play(sequence, SequenceFinished, NULL);
-    }
+        SilenceAllChannels();
 }
 
 music_module_t DG_music_module = {
@@ -673,5 +730,5 @@ music_module_t DG_music_module = {
     PD_PlaySong,
     PD_StopSong,
     PD_MusicIsPlaying,
-    NULL,
+    PD_PollMusic,
 };

@@ -70,13 +70,6 @@ static void menu_automap(void *ud)
     dgpd_ToggleAutomap();
 }
 
-static void menu_run(void *ud)
-{
-    PDMenuItem *item = ud;
-
-    dgpd_SetAlwaysRun(pd->system->getMenuItemValue(item));
-}
-
 static void menu_music(void *ud)
 {
     PDMenuItem *item = ud;
@@ -90,7 +83,7 @@ int eventHandler(PlaydateAPI *playdate, PDSystemEvent event, uint32_t arg)
 
     if (event == kEventInit)
     {
-        PDMenuItem *run, *music;
+        PDMenuItem *music;
 
         pd = playdate;
         pd->display->setRefreshRate(35);
@@ -98,8 +91,11 @@ int eventHandler(PlaydateAPI *playdate, PDSystemEvent event, uint32_t arg)
 
         pd->system->addMenuItem("Doom menu", menu_doom, NULL);
         automap_item = pd->system->addMenuItem("Automap", menu_automap, NULL);
-        run = pd->system->addCheckmarkMenuItem("Always run", 1, menu_run, NULL);
-        pd->system->setMenuItemUserdata(run, run);
+        // Playdate caps the system menu at 3 items; with "Doom menu" and
+        // "Automap" that leaves one slot, given to "Music". Always-run stays
+        // permanently on (dgpd_SetAlwaysRun's default) instead of being a
+        // menu toggle - it's still reachable via dgpd_SetAlwaysRun() if a
+        // future menu reshuffle frees up a slot for it.
         music = pd->system->addCheckmarkMenuItem("Music", 1, menu_music, NULL);
         pd->system->setMenuItemUserdata(music, music);
     }
