@@ -179,6 +179,15 @@ static int in_gameplay(void)
     return gamestate == GS_LEVEL && !menuactive && !demoplayback;
 }
 
+// The intermission/stats screen isn't a menu: it advances only when
+// WI_checkForAccelerate() sees BT_ATTACK/BT_USE in the tic command, which
+// requires the gameplay button mapping (A = fire, B = use) rather than
+// KEY_ENTER/KEY_BACKSPACE.
+static int accelerates_on_fire(void)
+{
+    return gamestate == GS_INTERMISSION && !menuactive && !demoplayback;
+}
+
 // Doom number key ('1'..'7') for the weapon after/before the one in hand
 // that the player owns.
 static void cycle_weapon(int dir)
@@ -251,6 +260,7 @@ void dgpd_PollInput(void)
     PlaydateAPI *pd = pd_glue_api();
     PDButtons cur, pushed, released;
     int gameplay = in_gameplay();
+    int map_gameplay = gameplay || accelerates_on_fire();
     int crank_out = !pd->system->isCrankDocked();
     int i;
 
@@ -297,7 +307,7 @@ void dgpd_PollInput(void)
         if (!(pushed & button_bit[i]))
             continue;
 
-        if (gameplay && i == BTN_B)
+        if (map_gameplay && i == BTN_B)
         {
             b_down = 1;
             b_chorded = 0;
@@ -311,7 +321,7 @@ void dgpd_PollInput(void)
             continue;
         }
 
-        key = map_button(i, gameplay, crank_out);
+        key = map_button(i, map_gameplay, crank_out);
         if (key)
         {
             queue_key(1, key);
