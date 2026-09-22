@@ -77,13 +77,20 @@ static void menu_run(void *ud)
     dgpd_SetAlwaysRun(pd->system->getMenuItemValue(item));
 }
 
+static void menu_music(void *ud)
+{
+    PDMenuItem *item = ud;
+
+    dgpd_SetMusicEnabled(pd->system->getMenuItemValue(item));
+}
+
 int eventHandler(PlaydateAPI *playdate, PDSystemEvent event, uint32_t arg)
 {
     (void)arg;
 
     if (event == kEventInit)
     {
-        PDMenuItem *run;
+        PDMenuItem *run, *music;
 
         pd = playdate;
         pd->display->setRefreshRate(35);
@@ -93,6 +100,8 @@ int eventHandler(PlaydateAPI *playdate, PDSystemEvent event, uint32_t arg)
         automap_item = pd->system->addMenuItem("Automap", menu_automap, NULL);
         run = pd->system->addCheckmarkMenuItem("Always run", 1, menu_run, NULL);
         pd->system->setMenuItemUserdata(run, run);
+        music = pd->system->addCheckmarkMenuItem("Music", 1, menu_music, NULL);
+        pd->system->setMenuItemUserdata(music, music);
     }
 
     return 0;

@@ -5,7 +5,10 @@
       "label": "Build: device (Release)",
       "type": "shell",
       "command": "./build.sh device Release",
-      "group": { "kind": "build", "isDefault": true },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
       "problemMatcher": "$gcc"
     },
     {
@@ -26,7 +29,7 @@
       "label": "Install on device (USB)",
       "type": "shell",
       "dependsOn": "Build: device (Release)",
-      "command": "PD=$(ls /dev/cu.usbmodemPD* | head -n 1) && \"$PLAYDATE_SDK_PATH/bin/pdutil\" \"$PD\" install \"${workspaceFolder}/doom_DEVICE.pdx\"",
+      "command": "./scripts/install-device.sh",
       "problemMatcher": []
     }
   ]

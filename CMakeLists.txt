@@ -118,6 +118,7 @@ set(DOOM_SOURCES
 
 set(PD_SOURCES
 	src/main.c
+	src/i_playdate_sound.c
 	src/pd_compat.c
 )
 
@@ -135,6 +136,7 @@ target_include_directories(${GAME_TARGET} PRIVATE ${DOOM_DIR} src)
 # 4 MiB zone heap (the device heap is 8 MiB); low detail is much faster.
 target_compile_definitions(${GAME_TARGET} PRIVATE
 	CMAP256
+	FEATURE_SOUND
 	DOOMGENERIC_RESX=320
 	DOOMGENERIC_RESY=200
 	DEFAULT_RAM=4
