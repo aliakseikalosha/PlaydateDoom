@@ -1,7 +1,7 @@
 // doomgeneric platform layer for the Playdate (400x240, 1-bit, D-pad + A/B + crank).
 //
-// Video:   Doom's 320x200 8-bit frame is ordered-dithered to 1 bit and centred
-//          in the 400x240 display.
+// Video:   Doom's 320x240 8-bit frame is ordered-dithered to 1 bit and centred
+//          in the 400x240 display (full height; only left/right bars remain).
 // Input:   D-pad moves/turns, A fires, B uses. The crank turns. With the crank
 //          extended the D-pad's left/right strafe instead of turning. Hold B
 //          and tap left/right to cycle weapons. In menus/intermissions A is

@@ -29,9 +29,12 @@ System menu: **Doom menu** (Esc), **Automap** (Tab), **Music** toggle. (Always-r
 
 ## Notes
 
-- 320x200 frame is ordered-dithered to 1-bit and centred on the 400x240 screen.
+- 320x240 frame is ordered-dithered to 1-bit and centred on the 400x240 screen (fills the full height; only side bars remain).
 - Zone heap is 4 MiB and low detail is the default (`CMakeLists.txt`) to fit/run on device.
 - Sound effects are mixed in software (`src/i_playdate_sound.c`). Music is converted MUS->MIDI (`mus2mid`), parsed into a flat note list, and scheduled directly onto plain `PDSynth` voices (percussion dropped; toggle in the system menu) - `PDSynthInstrument`/`SoundSequence`/`loadMIDIFile()` all turned out to be non-functional on-device (SDK/firmware 3.1.2), so music bypasses them entirely; see the comment above `PD_RegisterSong` in `src/i_playdate_sound.c`. Config (`.cfg`) is not loaded/saved; savegames go to the game's Data folder.
 - Patches to upstream doomgeneric are small: `i_system.c` (RAM sizes overridable),
   `m_menu.c` (default detail overridable), `g_game.c` (mouse motion accumulates so the
-  crank isn't dropped between tics), `doomgeneric.c` (screen buffer sized by `pixel_t`).
+  crank isn't dropped between tics), `doomgeneric.c` (screen buffer sized by `pixel_t`),
+  `i_video.h`/`r_main.c`/`d_main.c`/`st_stuff.c` (`SCREENHEIGHT` overridable to 240,
+  with the status bar's absolute Y coordinates and the view-height formula made
+  relative to it instead of hardcoded to the vanilla 200-tall screen).

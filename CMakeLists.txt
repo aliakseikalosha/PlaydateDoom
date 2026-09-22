@@ -132,13 +132,15 @@ endif()
 
 target_include_directories(${GAME_TARGET} PRIVATE ${DOOM_DIR} src)
 
-# Doom renders 320x200 palettised; the platform layer dithers it to 1-bit.
+# Doom renders 320x240 palettised (full Playdate screen height, letterboxed
+# left/right only); the platform layer dithers it to 1-bit.
 # 4 MiB zone heap (the device heap is 8 MiB); low detail is much faster.
 target_compile_definitions(${GAME_TARGET} PRIVATE
 	CMAP256
 	FEATURE_SOUND
+	SCREENHEIGHT=240
 	DOOMGENERIC_RESX=320
-	DOOMGENERIC_RESY=200
+	DOOMGENERIC_RESY=240
 	DEFAULT_RAM=4
 	MIN_RAM=2
 	DEFAULT_DETAIL=1
