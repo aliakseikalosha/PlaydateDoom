@@ -1,9 +1,19 @@
 // doomgeneric platform layer for the Playdate (400x240, 1-bit, D-pad + A/B + crank).
 //
-// Video:   Doom's 320x240 8-bit frame is ordered-dithered to 1 bit and centred
-//          in the 400x240 display (full height; only left/right bars remain).
-//          The same 2x2 banded ordered dither (see dither_masks below) is
-//          used everywhere - 3D view, automap, status bar, messages, menus.
+// Video:   Doom's 320x240 8-bit frame is converted to 1 bit and centred in
+//          the 400x240 display (full height; only left/right bars remain).
+//          Two conversion modes are available, selected from Doom's own
+//          Options menu (ditherMode, owned by m_menu.c like detailLevel):
+//          the default 2x2 banded ordered dither (see dither_mask below),
+//          or a random threshold dither that compares each colour against a
+//          cutoff jittered by noise (see rand_next), cut on average at the
+//          midpoint between the current palette's darkest and brightest
+//          colour (see build_luma) so it tracks Doom's palette shifts (e.g.
+//          the red damage flash) automatically. The noise is drawn from a
+//          PRNG separate from Doom's own (rendering must never consume the
+//          game's random table - that would desync demos and netgames).
+//          Whichever mode is active is used everywhere - 3D view, automap,
+//          status bar, messages, menus.
 // Input:   D-pad moves/turns, A fires, B uses. The crank turns. With the crank
 //          extended the D-pad's left/right strafe instead of turning. Hold B
 //          and tap left/right to cycle weapons. In menus/intermissions A is
@@ -33,6 +43,7 @@ extern boolean menuactive;
 extern boolean automapactive;
 extern int messageToPrint;
 extern boolean messageNeedsInput;
+extern int ditherMode; // Options menu: 0 = ordered dither (default), 1 = flat threshold
 
 // ---------------------------------------------------------------- video
 
@@ -43,23 +54,52 @@ extern boolean messageNeedsInput;
 // corner of its colour's mask.
 static const uint8_t dither_mask[5] = {0x0, 0x8, 0x9, 0x7, 0xF};
 
-static uint8_t level[256]; // intensity band (0-4) for each palette colour
+static uint8_t level[256];  // intensity band (0-4) for each palette colour, for ditherMode == 0
+static uint8_t pct[256];    // luma (0-100) for each palette colour, for ditherMode == 1
+static int base_threshold;  // ditherMode == 1's average cutoff, before per-pixel noise
+
+// +/- spread (percentage points) of the noise added to base_threshold per
+// pixel in ditherMode == 1, so flat areas get grain instead of a hard edge.
+#define THRESHOLD_NOISE 16
+
+// Small PRNG for rendering noise only, independent of Doom's own (M_Random
+// et al feed demo/netgame determinism and must not be touched here).
+static uint32_t rand_state = 0x9e3779b9u;
+
+static inline uint32_t rand_next(void)
+{
+    rand_state ^= rand_state << 13;
+    rand_state ^= rand_state >> 17;
+    rand_state ^= rand_state << 5;
+    return rand_state;
+}
 
 static void build_luma(void)
 {
     int i;
+    int min_pct = 100, max_pct = 0;
 
     for (i = 0; i < 256; i++)
     {
         int y = (colors[i].r * 77 + colors[i].g * 150 + colors[i].b * 29) >> 8;
-        int pct;
 
         // Doom's lighting is dark for a 1-bit panel; lift the mid-tones.
         y = (y + (int) sqrtf((float) (y * 255))) >> 1;
 
-        pct = y * 100 / 255;
-        level[i] = (uint8_t) (pct < 20 ? 0 : pct < 40 ? 1 : pct < 60 ? 2 : pct < 89 ? 3 : 4);
+        pct[i] = (uint8_t) (y * 100 / 255);
+        level[i] = (uint8_t) (pct[i] < 20 ? 0 : pct[i] < 40 ? 1 : pct[i] < 60 ? 2 : pct[i] < 89 ? 3 : 4);
+
+        if (pct[i] < min_pct)
+            min_pct = pct[i];
+        if (pct[i] > max_pct)
+            max_pct = pct[i];
     }
+
+    // Threshold mode's cutoff follows the current palette instead of a fixed
+    // value: the midpoint between its darkest and brightest colour, so the
+    // black/white split stays balanced across Doom's palette shifts (e.g.
+    // the red damage flash).
+    base_threshold = (min_pct + max_pct) / 2;
 }
 
 void DG_Init(void)
@@ -80,6 +120,36 @@ void DG_DrawFrame(void)
     {
         build_luma();
         palette_changed = false;
+    }
+
+    if (ditherMode)
+    {
+        // Random threshold: each pixel compares its colour's luma against
+        // base_threshold jittered by noise, so flat-coloured areas dither
+        // into grain instead of banding at a hard edge.
+        for (y = 0; y < DOOMGENERIC_RESY; y++)
+        {
+            uint8_t *dst = frame + (VIEW_Y + y) * LCD_ROWBYTES + VIEW_X_BYTES;
+
+            for (bx = 0; bx < DOOMGENERIC_RESX / 8; bx++)
+            {
+                uint8_t bits = 0;
+                int b;
+
+                for (b = 0; b < 8; b++)
+                {
+                    int noise = (int) (rand_next() % (2 * THRESHOLD_NOISE + 1)) - THRESHOLD_NOISE;
+
+                    if (pct[src[b]] >= base_threshold + noise)
+                        bits |= (uint8_t) (0x80 >> b);
+                }
+
+                dst[bx] = bits;
+                src += 8;
+            }
+        }
+        pd->graphics->markUpdatedRows(VIEW_Y, VIEW_Y + DOOMGENERIC_RESY - 1);
+        return;
     }
 
     for (y = 0; y < DOOMGENERIC_RESY; y++)
