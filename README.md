@@ -13,7 +13,7 @@ Needs the Playdate SDK (`PLAYDATE_SDK_PATH`), CMake, and for the device `arm-non
 
 Copy one or more WADs into `Source/wad/` **before building** (pdc bundles them into the .pdx).
 Any `*.wad` file works (standard names like `doom1.wad`/`doom2.wad` or your own); Doom detects E1M1 (Doom 1) vs MAP01 (Doom 2) games by contents. Heretic/Hexen/Strife/`voices.wad` are skipped as unsupported. Each WAD adds to the .pdx size, so bundle only what you want.
-With more than one present, a scrolling "Select WAD" screen appears at start (Up/Down, A to start); with one it boots straight in.
+With more than one present, a Cover Flow "Select WAD" screen appears at start (D-pad or crank to browse, A to start; each cover is the WAD's own title picture); with one it boots straight in.
 
 ## Controls
 
