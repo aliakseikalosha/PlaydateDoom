@@ -15,6 +15,7 @@
 #include "doomstat.h"
 #include "d_event.h"
 #include "d_player.h"
+#include "m_controls.h"
 
 #include "dgpd.h"
 #include "dgpd_dither.h"
@@ -131,42 +132,17 @@ static int accelerates_on_fire(void)
     return gamestate == GS_INTERMISSION && !menuactive && !demoplayback;
 }
 
-// Doom number key ('1'..'7') for the weapon after/before the one in hand
-// that the player owns.
+// Uses Doom's own next/previous-weapon keys, which walk weapon_order_table
+// and so handle the chainsaw and super shotgun (sharing slots 1 and 3 with
+// the fist/shotgun) correctly; number keys can only toggle within a slot.
 static void cycle_weapon(int dir)
 {
-    static const int order[7] = {wp_fist, wp_pistol, wp_shotgun, wp_chaingun,
-                                 wp_missile, wp_plasma, wp_bfg};
-    player_t *p = &players[consoleplayer];
-    int cur = 0, i;
+    unsigned char key = dir > 0 ? KEY_END : KEY_HOME;
 
-    switch (p->readyweapon)
-    {
-        case wp_chainsaw:      cur = 0; break;
-        case wp_supershotgun:  cur = 2; break;
-        default:
-            for (i = 0; i < 7; i++)
-                if (order[i] == (int) p->readyweapon)
-                    cur = i;
-    }
-
-    for (i = 1; i < 7; i++)
-    {
-        int idx = (cur + dir * i + 7 * 7) % 7;
-        int w = order[idx];
-        boolean owned = p->weaponowned[w];
-
-        if (idx == 0)
-            owned = owned || p->weaponowned[wp_chainsaw];
-        if (idx == 2)
-            owned = owned || p->weaponowned[wp_supershotgun];
-        if (owned)
-        {
-            queue_key(1, (unsigned char) ('1' + idx));
-            queue_key(0, (unsigned char) ('1' + idx));
-            return;
-        }
-    }
+    key_prevweapon = KEY_HOME;
+    key_nextweapon = KEY_END;
+    queue_key(1, key);
+    queue_key(0, key);
 }
 
 static unsigned char map_button(int btn, int gameplay, int crank_out)
