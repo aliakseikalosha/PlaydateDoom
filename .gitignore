@@ -1,4 +1,5 @@
 build*/
 Source/pdex.*
 *.pdx
-Source/*.wad
+Source/wad/*.wad
+!Source/wad/doom1.wad

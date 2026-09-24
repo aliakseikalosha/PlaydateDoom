@@ -7,7 +7,7 @@ void dgpd_OpenMenu(void);
 void dgpd_ToggleAutomap(void);
 void dgpd_SetAlwaysRun(int on);
 int dgpd_AutomapActive(void);
-// Implemented in i_playdate_sound.c.
-void dgpd_SetMusicEnabled(int on);
+// Implemented in i_playdate_sound.c: starts the audio mixer (call once Doom has loaded).
+void dgpd_StartAudio(void);
 
 #endif

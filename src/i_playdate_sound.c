@@ -125,9 +125,19 @@ static boolean PD_InitSound(boolean use_sfx_prefix)
     if (pd == NULL || pd->sound == NULL)
         return false;
 
+    // The mixer source is added later by dgpd_StartAudio(), once loading is done.
+    return true;
+}
+
+void dgpd_StartAudio(void)
+{
+    PlaydateAPI *pd = pd_glue_api();
+
+    if (sound_initialized || pd == NULL || pd->sound == NULL)
+        return;
+
     pd->sound->addSource(mix_callback, NULL, 1);
     sound_initialized = 1;
-    return true;
 }
 
 static void PD_ShutdownSound(void)
@@ -327,7 +337,6 @@ static int play_next_index;      // index of the next not-yet-scheduled note
 static int play_active;
 static int music_looping;
 static int music_volume = 127;
-static int music_enabled = 1;
 static int music_paused;
 
 static void ApplyMusicVolume(void)
@@ -533,7 +542,7 @@ static void PD_PollMusic(void)
     PlaydateAPI *pd = pd_glue_api();
     uint32_t now, horizon, song_end;
 
-    if (!play_active || current_song == NULL || music_paused || !music_enabled)
+    if (!play_active || current_song == NULL || music_paused)
         return;
 
     now = pd->sound->getCurrentTime();
@@ -693,8 +702,8 @@ static void PD_PlaySong(void *handle, boolean looping)
     play_next_index = 0;
     play_active = 1;
     PD_PollMusic(); // seed the initial lookahead window immediately
-    DiagLog("PlaySong: %d notes, looping=%d enabled=%d musicvol=%d",
-            song->count, looping, music_enabled, music_volume);
+    DiagLog("PlaySong: %d notes, looping=%d musicvol=%d",
+            song->count, looping, music_volume);
 }
 
 static void PD_StopSong(void)
@@ -707,14 +716,6 @@ static void PD_StopSong(void)
 static boolean PD_MusicIsPlaying(void)
 {
     return play_active;
-}
-
-// System-menu toggle.
-void dgpd_SetMusicEnabled(int on)
-{
-    music_enabled = on;
-    if (!on)
-        SilenceAllChannels();
 }
 
 music_module_t DG_music_module = {

@@ -114,12 +114,14 @@ set(DOOM_SOURCES
 	${DOOM_DIR}/doomgeneric.c
 	${DOOM_DIR}/mus2mid.c
 	src/doomgeneric_playdate.c
+	src/dgpd_dither.c
 )
 
 set(PD_SOURCES
 	src/main.c
 	src/i_playdate_sound.c
 	src/pd_compat.c
+	src/dgpd_wadselect.c
 )
 
 if (TOOLCHAIN STREQUAL "armgcc")

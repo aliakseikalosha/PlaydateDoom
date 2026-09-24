@@ -5,6 +5,7 @@
 #include "pd_api.h"
 
 #include "dgpd.h"
+#include "dgpd_wadselect.h"
 #include "pd_glue.h"
 
 // doomgeneric.h pulls in Doom types; declare just what is needed here.
@@ -21,29 +22,44 @@ PlaydateAPI *pd_glue_api(void)
 static PDMenuItem *automap_item;
 static int automap_shown; // title currently reflects an open automap
 
-static int boot_stage; // 0: show splash, 1: load Doom, 2: running
+// 0: pick a WAD, 1: show splash, 2: load Doom, 3: running
+enum
+{
+    BOOT_SELECT,
+    BOOT_SPLASH,
+    BOOT_LOAD,
+    BOOT_RUN
+};
+static int boot_stage = BOOT_SELECT;
 
 static int update(void *userdata)
 {
     (void)userdata;
 
-    if (boot_stage == 0)
+    if (boot_stage == BOOT_SELECT)
     {
-        const char *msg = "Loading DOOM...";
-
-        pd->graphics->clear(kColorBlack);
-        pd->graphics->setDrawMode(kDrawModeFillWhite);
-        pd->graphics->drawText(msg, strlen(msg), kASCIIEncoding, 140, 112);
-        boot_stage = 1;
+        if (dgpd_wad_Update())
+            boot_stage = BOOT_SPLASH;
         return 1;
     }
 
-    if (boot_stage == 1)
+    if (boot_stage == BOOT_SPLASH)
     {
-        static char *argv[] = {"doom", "-iwad", "doom1.wad", "-nogui", NULL};
+        dgpd_wad_DrawMessage("Loading Game...");
+        boot_stage = BOOT_LOAD;
+        return 1;
+    }
+
+    if (boot_stage == BOOT_LOAD)
+    {
+        // static: Doom keeps myargv and reads it for the whole session (e.g. at demo start)
+        static char *argv[] = {"doom", "-iwad", NULL, "-nogui", NULL};
+
+        argv[2] = (char *)dgpd_wad_Path();
 
         doomgeneric_Create(4, argv);
-        boot_stage = 2;
+        dgpd_StartAudio(); // only now: a mixer running through the long load makes a tone
+        boot_stage = BOOT_RUN;
         return 1;
     }
 
@@ -61,20 +77,15 @@ static int update(void *userdata)
 static void menu_doom(void *ud)
 {
     (void)ud;
-    dgpd_OpenMenu();
+    if (boot_stage == BOOT_RUN)
+        dgpd_OpenMenu();
 }
 
 static void menu_automap(void *ud)
 {
     (void)ud;
-    dgpd_ToggleAutomap();
-}
-
-static void menu_music(void *ud)
-{
-    PDMenuItem *item = ud;
-
-    dgpd_SetMusicEnabled(pd->system->getMenuItemValue(item));
+    if (boot_stage == BOOT_RUN)
+        dgpd_ToggleAutomap();
 }
 
 int eventHandler(PlaydateAPI *playdate, PDSystemEvent event, uint32_t arg)
@@ -83,21 +94,16 @@ int eventHandler(PlaydateAPI *playdate, PDSystemEvent event, uint32_t arg)
 
     if (event == kEventInit)
     {
-        PDMenuItem *music;
-
         pd = playdate;
         pd->display->setRefreshRate(35);
         pd->system->setUpdateCallback(update, NULL);
+        dgpd_wad_Scan();
 
-        pd->system->addMenuItem("Doom menu", menu_doom, NULL);
+        pd->system->addMenuItem("Game menu", menu_doom, NULL);
         automap_item = pd->system->addMenuItem("Automap", menu_automap, NULL);
-        // Playdate caps the system menu at 3 items; with "Doom menu" and
-        // "Automap" that leaves one slot, given to "Music". Always-run stays
-        // permanently on (dgpd_SetAlwaysRun's default) instead of being a
-        // menu toggle - it's still reachable via dgpd_SetAlwaysRun() if a
-        // future menu reshuffle frees up a slot for it.
-        music = pd->system->addCheckmarkMenuItem("Music", 1, menu_music, NULL);
-        pd->system->setMenuItemUserdata(music, music);
+        // Music on/off lives in Doom's own Sound Volume options (music volume 0).
+        // Always-run stays permanently on (dgpd_SetAlwaysRun's default); it's
+        // still reachable via dgpd_SetAlwaysRun() if a menu slot ever frees up.
     }
 
     return 0;
