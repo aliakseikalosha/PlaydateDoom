@@ -5,8 +5,9 @@
 //          by dgpd_dither_ConvertFrame (see dgpd_dither.c for the dither
 //          algorithms themselves).
 // Input:   D-pad moves/turns, A fires, B uses. The crank turns. With the crank
-//          extended the D-pad's left/right strafe instead of turning. Hold B
-//          and tap left/right to cycle weapons. In menus/intermissions A is
+//          extended the D-pad's left/right strafe instead of turning, and the
+//          weapon auto-fires while a monster is in front of the player (Options
+//          menu toggle). Hold B and tap left/right to cycle weapons. In menus/intermissions A is
 //          Enter and B is Back (or Yes/No on confirmation prompts).
 #include <stdint.h>
 
@@ -16,6 +17,8 @@
 #include "d_event.h"
 #include "d_player.h"
 #include "m_controls.h"
+#include "p_local.h"
+#include "p_mobj.h"
 
 #include "dgpd.h"
 #include "dgpd_dither.h"
@@ -31,6 +34,7 @@
 
 extern boolean menuactive;
 extern boolean automapactive;
+extern int autoFire; // Options menu toggle (m_menu.c)
 extern int messageToPrint;
 extern boolean messageNeedsInput;
 
@@ -117,6 +121,7 @@ static int use_release_pending;           // release KEY_USE on the next frame
 static int run_held;                      // KEY_RSHIFT currently held for always-run
 static int always_run = 1;
 static unsigned char pending_menu_key;    // from the system menu
+static int autofire_held;                 // KEY_FIRE held by crank-out auto fire
 
 static int in_gameplay(void)
 {
@@ -143,6 +148,34 @@ static void cycle_weapon(int dir)
     key_nextweapon = KEY_END;
     queue_key(1, key);
     queue_key(0, key);
+}
+
+// True when a live monster is in front of the player, probing the same three
+// angles P_BulletSlope uses so auto fire triggers exactly when a shot would
+// be auto-aimed at something. Fist/chainsaw only count targets in melee reach.
+static int enemy_in_front(void)
+{
+    player_t *player = &players[consoleplayer];
+    mobj_t *mo = player->mo;
+    fixed_t range;
+    angle_t an;
+    int i;
+
+    if (!mo || player->playerstate != PST_LIVE)
+        return 0;
+
+    range = (player->readyweapon == wp_fist || player->readyweapon == wp_chainsaw)
+            ? MELEERANGE : 16 * 64 * FRACUNIT;
+
+    an = mo->angle;
+    for (i = 0; i < 3; i++)
+    {
+        P_AimLineAttack(mo, an, range);
+        if (linetarget && (linetarget->flags & MF_COUNTKILL) && linetarget->health > 0)
+            return 1;
+        an += (i == 0) ? 1 << 26 : -(2 << 26);
+    }
+    return 0;
 }
 
 static unsigned char map_button(int btn, int gameplay, int crank_out)
@@ -199,17 +232,27 @@ void dgpd_PollInput(void)
     pd->system->getButtonState(&cur, &pushed, &released);
 
     // Releases first, so a mode change (e.g. a menu opening) never strands a
-    // key that was pressed under the previous mapping.
+    // key that was pressed under the previous mapping. The release edge alone
+    // isn't trusted: a tap shorter than one (slow) update reports pushed and
+    // released together, and a release while the system menu is open is never
+    // reported at all. Either would leave the key down forever, so anything
+    // no longer in the current state is released too. A same-update tap is
+    // pushed below and released here on the next poll, so Doom still sees it
+    // for one frame.
     for (i = 0; i < BTN_COUNT; i++)
     {
-        if ((released & button_bit[i]) && held_key[i])
+        if (held_key[i] && ((released & button_bit[i]) || !(cur & button_bit[i])))
         {
             queue_key(0, held_key[i]);
             held_key[i] = 0;
+
+            // Letting go of A must not cancel auto fire that is still on.
+            if (i == BTN_A && autofire_held)
+                queue_key(1, KEY_FIRE);
         }
     }
 
-    if (b_down && (released & kButtonB))
+    if (b_down && ((released & kButtonB) || !(cur & kButtonB)))
     {
         b_down = 0;
         if (!b_chorded)
@@ -258,6 +301,23 @@ void dgpd_PollInput(void)
     {
         queue_key(0, KEY_RSHIFT);
         run_held = 0;
+    }
+
+    // Crank-out auto fire: hold fire while an enemy is in front. A is still
+    // free to fire manually; the hold is only released when neither wants it.
+    if (gameplay && autoFire && crank_out && !b_down && enemy_in_front())
+    {
+        if (!autofire_held)
+        {
+            queue_key(1, KEY_FIRE);
+            autofire_held = 1;
+        }
+    }
+    else if (autofire_held)
+    {
+        autofire_held = 0;
+        if (!held_key[BTN_A])
+            queue_key(0, KEY_FIRE);
     }
 
     if (gameplay)
