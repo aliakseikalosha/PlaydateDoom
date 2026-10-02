@@ -3,3 +3,4 @@ Source/pdex.*
 *.pdx
 Source/wad/*.wad
 !Source/wad/doom1.wad
+Source/music/

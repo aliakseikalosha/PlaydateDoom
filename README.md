@@ -32,7 +32,7 @@ System menu: **Doom menu** (Esc), **Automap** (Tab). Music/sfx volume are in Doo
 
 - 320x240 frame is ordered-dithered to 1-bit and centred on the 400x240 screen (fills the full height; only side bars remain).
 - Zone heap is 4 MiB and low detail is the default (`CMakeLists.txt`) to fit/run on device.
-- Sound effects are mixed in software (`src/i_playdate_sound.c`). Music is converted MUS->MIDI (`mus2mid`), parsed into a flat note list, and scheduled directly onto plain `PDSynth` voices (percussion dropped) - `PDSynthInstrument`/`SoundSequence`/`loadMIDIFile()` all turned out to be non-functional on-device (SDK/firmware 3.1.2), so music bypasses them entirely; see the comment above `PD_RegisterSong` in `src/i_playdate_sound.c`. Config (`.cfg`) is not loaded/saved; savegames go to the game's Data folder.
+- Sound effects are mixed in software (`src/i_playdate_sound.c`). Music is pre-rendered at build time: `tools/musrender.c` renders every music lump (MUS/MIDI) in `Source/wad/*.wad` with a small built-in synth to IMA-ADPCM WAVs in `Source/music/` (named by a hash of the lump, cached between builds), pdc converts them to `.pda`, and the game streams them with a `FilePlayer` (`src/i_playdate_sound.c`). Config (`.cfg`) is not loaded/saved; savegames go to the game's Data folder.
 - Patches to upstream doomgeneric are small: `i_system.c` (RAM sizes overridable),
   `m_menu.c` (default detail overridable), `g_game.c` (mouse motion accumulates so the
   crank isn't dropped between tics), `doomgeneric.c` (screen buffer sized by `pixel_t`),

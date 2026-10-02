@@ -57,7 +57,6 @@ set(DOOM_SOURCES
 	${DOOM_DIR}/i_sound.c
 	${DOOM_DIR}/i_system.c
 	${DOOM_DIR}/i_timer.c
-	${DOOM_DIR}/memio.c
 	${DOOM_DIR}/m_argv.c
 	${DOOM_DIR}/m_bbox.c
 	${DOOM_DIR}/m_cheat.c
@@ -112,7 +111,6 @@ set(DOOM_SOURCES
 	${DOOM_DIR}/i_input.c
 	${DOOM_DIR}/i_video.c
 	${DOOM_DIR}/doomgeneric.c
-	${DOOM_DIR}/mus2mid.c
 	src/doomgeneric_playdate.c
 	src/dgpd_dither.c
 )
@@ -130,6 +128,17 @@ if (TOOLCHAIN STREQUAL "armgcc")
 else()
 	add_library(${PLAYDATE_GAME_NAME} SHARED ${DOOM_SOURCES} ${PD_SOURCES})
 	set(GAME_TARGET ${PLAYDATE_GAME_NAME})
+endif()
+
+# Music is pre-rendered at build time: tools/musrender scans Source/wad/*.wad and
+# writes ADPCM WAVs into Source/music (cached by content hash), which pdc bundles.
+if (NOT CMAKE_HOST_WIN32)
+	add_custom_target(doom_music ALL
+		COMMAND cc -O2 -o ${CMAKE_BINARY_DIR}/musrender ${CMAKE_CURRENT_SOURCE_DIR}/tools/musrender.c -lm
+		COMMAND ${CMAKE_BINARY_DIR}/musrender ${CMAKE_CURRENT_SOURCE_DIR}/Source/wad ${CMAKE_CURRENT_SOURCE_DIR}/Source/music
+		COMMENT "Rendering WAD music"
+		VERBATIM)
+	add_dependencies(${GAME_TARGET} doom_music)
 endif()
 
 target_include_directories(${GAME_TARGET} PRIVATE ${DOOM_DIR} src)

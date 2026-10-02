@@ -16,12 +16,7 @@
 #include "pd_glue.h"
 
 // Any *.wad in the wad folder is offered; Doom identifies E1M1/MAP01
-// games by contents when the name is not a standard one. These engines'
-// IWADs would be misdetected as Doom, so they are skipped by name.
-static const char *const unsupported_wads[] = {
-    "heretic.wad", "heretic1.wad", "hexen.wad", "hexendemo.wad", "hexdd.wad",
-    "strife0.wad", "strife1.wad", "voices.wad",
-};
+// games by contents when the name is not a standard one.
 
 // Caption shown under the cover for well-known WADs (other files show their
 // file name without the extension).
@@ -112,16 +107,12 @@ static int is_wad(const char *name)
 
 static void wad_found(const char *filename, void *ud)
 {
-    size_t i, len = strlen(filename);
+    size_t len = strlen(filename);
 
     (void)ud;
     if (wad_count >= MAX_WADS || len >= WAD_NAME_LEN || len < 5
         || strcasecmp(filename + len - 4, ".wad") != 0)
         return;
-
-    for (i = 0; i < sizeof(unsupported_wads) / sizeof(unsupported_wads[0]); ++i)
-        if (strcasecmp(filename, unsupported_wads[i]) == 0)
-            return;
 
     if (is_wad(filename))
         strcpy(wad_names[wad_count++], filename);
