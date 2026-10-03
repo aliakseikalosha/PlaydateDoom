@@ -1,0 +1,8 @@
+# WADs bundled by scripts/build-release.sh: one file name per line, looked up in
+# Source/wad/. Only list WADs that may be redistributed. Missing files are skipped.
+doom1.wad       # Doom shareware (episode 1)
+freedoom1.wad   # Freedoom (free license)
+freedoom2.wad
+
+# Left out on purpose: Chex Quest (chex.wad, chex3.wad) is free to download but
+# comes without a redistribution license. Add it above if you are fine with that.

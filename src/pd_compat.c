@@ -17,6 +17,7 @@
 #undef exit
 #undef remove
 #undef rename
+#undef mkdir
 #undef putchar
 
 #include "pd_api.h"
@@ -35,11 +36,41 @@ static int ends_with(const char *s, const char *suffix)
     return ls >= lx && strcmp(s + ls - lx, suffix) == 0;
 }
 
+// Doom builds its paths from a config dir of "."; the Playdate file API wants
+// them relative to the Data folder without it.
+static const char *skip_dot_slash(const char *path)
+{
+    while (path[0] == '.' && path[1] == '/')
+        path += 2;
+    return path;
+}
+
+// The Playdate file API won't create missing folders (and Doom's mkdir is
+// stubbed out), so make the ones a file is about to be written into, e.g.
+// ".savegame/" for savegames. Fails harmlessly for folders that exist.
+static void make_parent_dirs(const char *path)
+{
+    char dir[256];
+    size_t i;
+
+    for (i = 1; path[i] != '\0' && i < sizeof(dir); i++)
+    {
+        if (path[i] == '/')
+        {
+            memcpy(dir, path, i);
+            dir[i] = '\0';
+            pd_glue_api()->file->mkdir(dir);
+        }
+    }
+}
+
 FILE *pd_fopen(const char *path, const char *mode)
 {
     FileOptions opts;
     SDFile *sd;
     pd_file_t *f;
+
+    path = skip_dot_slash(path);
 
     // Doom's .cfg files are text and read with fscanf; skip them and run on
     // built-in defaults.
@@ -50,9 +81,15 @@ FILE *pd_fopen(const char *path, const char *mode)
     }
 
     if (mode[0] == 'w')
+    {
+        make_parent_dirs(path);
         opts = kFileWrite;
+    }
     else if (mode[0] == 'a')
+    {
+        make_parent_dirs(path);
         opts = kFileAppend;
+    }
     else
         opts = kFileRead | kFileReadData;
 
@@ -121,16 +158,23 @@ int pd_fflush(FILE *stream)
 
 static void log_line(const char *s)
 {
-    size_t n = strlen(s);
+    char line[sizeof(last_message)];
+    size_t n;
 
-    // Keep the most recent message; I_Error prints the reason just before
-    // exiting, and pd_exit shows it on screen.
-    strncpy(last_message, s, sizeof(last_message) - 1);
-    last_message[sizeof(last_message) - 1] = '\0';
-    while (n > 0 && (last_message[n - 1] == '\n' || last_message[n - 1] == ' '))
-        last_message[--n] = '\0';
-    if (n > 0)
-        pd_glue_api()->system->logToConsole("%s", last_message);
+    strncpy(line, s, sizeof(line) - 1);
+    line[sizeof(line) - 1] = '\0';
+    n = strlen(line);
+    while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == ' '))
+        line[--n] = '\0';
+
+    // Blank lines don't count: I_Error prints "\n\n" right after the reason,
+    // which must not replace it.
+    if (n == 0)
+        return;
+
+    // Keep the most recent message; pd_exit shows it on screen.
+    memcpy(last_message, line, n + 1);
+    pd_glue_api()->system->logToConsole("%s", last_message);
 }
 
 int pd_vfprintf(FILE *stream, const char *fmt, va_list ap)

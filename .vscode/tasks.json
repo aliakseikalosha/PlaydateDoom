@@ -26,6 +26,13 @@
       "problemMatcher": "$gcc"
     },
     {
+      "label": "Release: shareware/free WADs only (release/doom.pdx)",
+      "type": "shell",
+      "command": "./scripts/build-release.sh",
+      "group": "build",
+      "problemMatcher": "$gcc"
+    },
+    {
       "label": "Install on device (USB)",
       "type": "shell",
       "dependsOn": "Build: device (Release)",
