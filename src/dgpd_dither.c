@@ -2,7 +2,7 @@
 // Playdate glue (doomgeneric_playdate.c) so the dither algorithms can be
 // tuned without touching input/timing/frame-buffer code.
 //
-// Five modes are available, selected from Doom's own Options menu
+// Six modes are available, selected from Doom's own Options menu
 // (ditherMode, owned by m_menu.c like detailLevel): the default 2x2 banded
 // ordered dither (see dither_mask2x2 below); a random threshold dither
 // that compares each colour against a cutoff jittered by noise (see
@@ -16,9 +16,12 @@
 // no repeating grid structure visible to the eye like the Bayer patterns
 // do; or a Floyd-Steinberg error-diffusion threshold (see
 // convert_error_diffusion below) that spreads each pixel's quantization
-// error to its not-yet-visited neighbours in the same frame. Whichever mode
-// is active is used everywhere - 3D view, automap, status bar, messages,
-// menus.
+// error to its not-yet-visited neighbours in the same frame; or the 2x2
+// ordered dither again, but with the error left over from snapping each
+// pixel to one of its five intensity bands carried to its neighbours the same
+// way (see convert_ordered_2x2_carry below), so the bands blend instead of
+// showing hard edges. Whichever mode is active is used everywhere - 3D view,
+// automap, status bar, messages, menus.
 #include <math.h>
 #include <stdint.h>
 #include <string.h>
@@ -36,6 +39,7 @@ enum
     DITHER_ORDERED_4X4,
     DITHER_BLUE_NOISE,
     DITHER_ERROR_DIFFUSION,
+    DITHER_ORDERED_2X2_CARRY,
 };
 
 extern int ditherMode; // Options menu: which of the modes above is active
@@ -98,7 +102,8 @@ static int base_threshold;    // threshold modes' average cutoff (DITHER_RANDOM_
 
 // Error-diffusion scratch rows (with a 1-pixel guard on each side) holding
 // the quantization error pushed onto the current and next row, in 1/16ths of
-// a luma percentage point. Rebuilt from zero every frame, so no error ever
+// a luma percentage point. Shared by DITHER_ERROR_DIFFUSION and
+// DITHER_ORDERED_2X2_CARRY. Rebuilt from zero every frame, so no error ever
 // carries from one frame to the next.
 static int32_t diffusion_err[2][DOOMGENERIC_RESX + 2];
 
@@ -306,6 +311,83 @@ static void convert_error_diffusion(uint8_t *dst, int dst_stride, const uint8_t 
     }
 }
 
+static void convert_ordered_2x2_carry(uint8_t *dst, int dst_stride, const uint8_t *src)
+{
+    const int cells = DOOMGENERIC_RESX / 2;
+    int cy, cx, k;
+    int32_t *cur = diffusion_err[0] + 1;
+    int32_t *next = diffusion_err[1] + 1;
+
+    memset(diffusion_err, 0, sizeof(diffusion_err));
+
+    // convert_ordered_2x2's banding with the leftover carried on, one 2x2 cell
+    // at a time. Every pixel of a cell adds the error handed to the cell by
+    // its neighbours to its own luma, snaps to the nearest of the five
+    // coverages the 2x2 masks can show (0, 25, 50, 75, 100%) and is then lit
+    // or not by that band's mask at its own screen position, exactly as in
+    // the plain 2x2 mode. The cell's error - what its pixels asked for minus
+    // what they actually lit, averaged - goes to the neighbouring cells with
+    // Floyd-Steinberg weights, in serpentine order (see
+    // convert_error_diffusion). Diffusing per cell rather than per pixel
+    // keeps the error honest: a pixel's output depends on its mask corner as
+    // well as its band, so an error measured against the band's nominal
+    // coverage would be wrong pixel by pixel and the mistakes would feed back
+    // into streaks. Each adjusted luma is clamped to 0-100% first so error
+    // that can't be shown anyway (pushing past pure black or white) doesn't
+    // leak into flat areas.
+    for (cy = 0; cy < DOOMGENERIC_RESY / 2; cy++)
+    {
+        uint8_t *rows[2] = {dst + cy * 2 * dst_stride, dst + (cy * 2 + 1) * dst_stride};
+        const uint8_t *srcs[2] = {src + cy * 2 * DOOMGENERIC_RESX, src + (cy * 2 + 1) * DOOMGENERIC_RESX};
+        int ltr = !(cy & 1);
+        int dir = ltr ? 1 : -1;
+
+        memset(rows[0], 0, DOOMGENERIC_RESX / 8);
+        memset(rows[1], 0, DOOMGENERIC_RESX / 8);
+        memset(next - 1, 0, (cells + 2) * sizeof(*next));
+
+        for (cx = ltr ? 0 : cells - 1; cx >= 0 && cx < cells; cx += dir)
+        {
+            int carry = cur[cx];
+            int asked = 0, shown = 0;
+            int err;
+
+            // k = corner within the cell: bit 0 is the column (x%2), bit 1
+            // the row (y%2) - the same order as dither_mask2x2's TL,TR,BL,BR.
+            for (k = 0; k < 4; k++)
+            {
+                int x = cx * 2 + (k & 1);
+                int adjusted = pct[srcs[k >> 1][x]] * 16 + carry;
+                int band;
+
+                adjusted = adjusted < 0 ? 0 : adjusted > 100 * 16 ? 100 * 16 : adjusted;
+                band = (adjusted + 25 * 16 / 2) / (25 * 16); // nearest of bands 0-4
+                asked += adjusted;
+
+                if (dither_mask2x2[band] & (0x8 >> k))
+                {
+                    rows[k >> 1][x >> 3] |= (uint8_t) (0x80 >> (x & 7));
+                    shown += 100 * 16;
+                }
+            }
+
+            err = (asked - shown) / 4;
+
+            cur[cx + dir] += err * 7 / 16;
+            next[cx - dir] += err * 3 / 16;
+            next[cx] += err * 5 / 16;
+            next[cx + dir] += err / 16;
+        }
+
+        {
+            int32_t *tmp = cur;
+
+            cur = next;
+            next = tmp;
+        }
+    }
+}
+
 void dgpd_dither_ConvertFrame(uint8_t *dst, int dst_stride)
 {
     const uint8_t *src = (const uint8_t *) DG_ScreenBuffer;
@@ -332,6 +414,10 @@ void dgpd_dither_ConvertFrame(uint8_t *dst, int dst_stride)
 
         case DITHER_ERROR_DIFFUSION:
             convert_error_diffusion(dst, dst_stride, src);
+            break;
+
+        case DITHER_ORDERED_2X2_CARRY:
+            convert_ordered_2x2_carry(dst, dst_stride, src);
             break;
 
         default:

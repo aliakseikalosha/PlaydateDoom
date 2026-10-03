@@ -160,4 +160,14 @@ target_compile_definitions(${GAME_TARGET} PRIVATE
 set_source_files_properties(${DOOM_SOURCES} PROPERTIES COMPILE_OPTIONS
 	"-include;${CMAKE_CURRENT_SOURCE_DIR}/src/pd_compat.h;-w;-fcommon;-std=gnu99")
 
+# Bump Source/pdxinfo's buildNumber on every build that relinks the game. This
+# must be added before the SDK's cmake below: its POST_BUILD step runs pdc,
+# which bundles pdxinfo, and POST_BUILD commands run in the order added.
+add_custom_command(TARGET ${GAME_TARGET} POST_BUILD
+	COMMAND ${CMAKE_COMMAND}
+		-DPDXINFO=${CMAKE_CURRENT_SOURCE_DIR}/Source/pdxinfo
+		-P ${CMAKE_CURRENT_SOURCE_DIR}/scripts/bump_build_number.cmake
+	COMMENT "Bumping pdxinfo buildNumber"
+	VERBATIM)
+
 include(${SDK}/C_API/buildsupport/playdate_game.cmake)
