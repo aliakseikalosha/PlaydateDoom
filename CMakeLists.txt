@@ -171,3 +171,22 @@ add_custom_command(TARGET ${GAME_TARGET} POST_BUILD
 	VERBATIM)
 
 include(${SDK}/C_API/buildsupport/playdate_game.cmake)
+
+# The SDK only runs pdc as the game target's POST_BUILD step, i.e. when the game
+# relinks. Adding or removing a WAD (and the music rendered from it) changes
+# nothing the game target depends on, so the .pdx kept its old WADs and the
+# device install copied that stale bundle. Repackage on every build (~2 s).
+if (TOOLCHAIN STREQUAL "armgcc")
+	set(PDX_OUT ${PRODUCT_DIR}/${PLAYDATE_GAME_DEVICE}.pdx)
+else()
+	set(PDX_OUT ${PRODUCT_DIR}/${PLAYDATE_GAME_NAME}.pdx)
+endif()
+add_custom_target(doom_pdx ALL
+	COMMAND ${PDC} ${CMAKE_CURRENT_SOURCE_DIR}/Source ${PDX_OUT}
+	WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+	COMMENT "Packaging ${PDX_OUT}"
+	VERBATIM)
+add_dependencies(doom_pdx ${GAME_TARGET})
+if (TARGET doom_music)
+	add_dependencies(doom_pdx doom_music)
+endif()

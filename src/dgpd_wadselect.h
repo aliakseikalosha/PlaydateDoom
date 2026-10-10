@@ -12,6 +12,14 @@ void dgpd_wad_Scan(void);
 // WADs it shows an error and keeps returning 0.
 int dgpd_wad_Update(void);
 
+// Opens the picker on the named WAD (a file name in wad/, e.g. "doom1.wad") for
+// when the player comes back from a game. The picker then always waits for a
+// choice, even with a single WAD. Call after dgpd_wad_Scan.
+void dgpd_wad_Return(const char *name);
+
+// File name of the chosen WAD, e.g. "doom1.wad".
+const char *dgpd_wad_Name(void);
+
 // Path of the chosen WAD, e.g. "wad/doom1.wad", valid for the rest of the
 // session (Doom keeps pointers into its argv).
 const char *dgpd_wad_Path(void);

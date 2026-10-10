@@ -44,6 +44,19 @@ static void DiagLog(const char *fmt, ...)
 #define MIX_CHANNELS 16
 #define OUT_RATE 44100
 
+// What is known about one sound effect. Only this metadata stays resident:
+// the sample data itself is the WAD lump in Doom's zone heap, which is pinned
+// (PU_STATIC) while a channel plays it and purgeable (PU_CACHE) otherwise.
+// Freedoom's effects total 1.4-2.5 MB, so keeping every one that was ever
+// played permanently in the 4 MiB zone starves the level loader.
+typedef struct
+{
+    int lumpnum;
+    uint32_t length; // in samples; 0 if the lump is not a usable DMX sound
+    uint32_t rate;
+    int pins;        // channels currently playing (and so pinning) the lump
+} sfx_data_t;
+
 typedef struct
 {
     const uint8_t *data; // unsigned 8-bit samples
@@ -52,6 +65,7 @@ typedef struct
     uint32_t step;       // 16.16 fixed-point increment per output sample
     int left, right;     // 0..254 gains
     volatile int active;
+    sfx_data_t *pinned;  // sound whose lump this channel holds; main thread only
 } mix_channel_t;
 
 static mix_channel_t mix_channels[MIX_CHANNELS];
@@ -60,13 +74,6 @@ static int sound_initialized;
 // Config variables i_sound.c binds under FEATURE_SOUND (normally from i_sdlsound.c).
 int use_libsamplerate = 0;
 float libsamplerate_scale = 0.65f;
-
-typedef struct
-{
-    const uint8_t *data;
-    uint32_t length;
-    uint32_t rate;
-} sfx_data_t;
 
 // Runs on the audio thread.
 static int mix_callback(void *context, int16_t *left, int16_t *right, int len)
@@ -137,12 +144,17 @@ void dgpd_StartAudio(void)
     sound_initialized = 1;
 }
 
+static void ReleaseChannel(mix_channel_t *ch);
+
 static void PD_ShutdownSound(void)
 {
     int c;
 
     for (c = 0; c < MIX_CHANNELS; ++c)
+    {
         mix_channels[c].active = 0;
+        ReleaseChannel(&mix_channels[c]);
+    }
 }
 
 static int PD_GetSfxLumpNum(sfxinfo_t *sfx)
@@ -156,7 +168,8 @@ static int PD_GetSfxLumpNum(sfxinfo_t *sfx)
     return W_CheckNumForName(name);
 }
 
-// Parse a DMX sound lump once and keep it resident.
+// Parses a DMX sound lump once and remembers its format. A sound and the
+// sounds linked to it share one entry (and so one pin count).
 static sfx_data_t *LoadSfx(sfxinfo_t *sfx)
 {
     sfx_data_t *sd;
@@ -164,6 +177,8 @@ static sfx_data_t *LoadSfx(sfxinfo_t *sfx)
     uint32_t len, lumplen;
     int lumpnum;
 
+    if (sfx->link != NULL)
+        sfx = sfx->link;
     if (sfx->driver_data != NULL)
         return sfx->driver_data;
 
@@ -171,28 +186,47 @@ static sfx_data_t *LoadSfx(sfxinfo_t *sfx)
     if (lumpnum < 0)
         return NULL;
 
-    lumplen = W_LumpLength(lumpnum);
-    if (lumplen < 8)
-        return NULL;
-
-    lump = W_CacheLumpNum(lumpnum, PU_STATIC);
-    if (lump[0] != 0x03 || lump[1] != 0x00)
-        return NULL;
-
-    len = lump[4] | (lump[5] << 8) | (lump[6] << 16) | ((uint32_t)lump[7] << 24);
-    if (len > lumplen - 8 || len <= 48)
-        return NULL;
-
-    // 16 bytes of padding on each side of the sample data.
     sd = malloc(sizeof(*sd));
     if (sd == NULL)
         return NULL;
-    sd->rate = lump[2] | (lump[3] << 8);
-    sd->data = lump + 8 + 16;
-    sd->length = len - 32;
+    sd->lumpnum = lumpnum;
+    sd->length = 0;
+    sd->rate = 0;
+    sd->pins = 0;
 
+    lumplen = W_LumpLength(lumpnum);
+    if (lumplen >= 8)
+    {
+        // Purgeable, and only read right here: nothing allocates from the zone
+        // before the header has been parsed.
+        lump = W_CacheLumpNum(lumpnum, PU_CACHE);
+        len = lump[4] | (lump[5] << 8) | (lump[6] << 16) | ((uint32_t)lump[7] << 24);
+
+        // 16 bytes of padding on each side of the sample data.
+        if (lump[0] == 0x03 && lump[1] == 0x00 && len <= lumplen - 8 && len > 48)
+        {
+            sd->rate = lump[2] | (lump[3] << 8);
+            sd->length = len - 32;
+        }
+    }
+
+    // Unusable sounds keep their (empty) entry so the lump isn't re-read.
     sfx->driver_data = sd;
     return sd;
+}
+
+// Lets go of the lump a channel was playing, making it purgeable again once
+// no other channel is on it. Only call this once the audio thread is done with
+// the channel (active cleared).
+static void ReleaseChannel(mix_channel_t *ch)
+{
+    sfx_data_t *sd = ch->pinned;
+
+    if (sd == NULL)
+        return;
+    ch->pinned = NULL;
+    if (--sd->pins == 0)
+        W_ReleaseLumpNum(sd->lumpnum);
 }
 
 static void PD_UpdateSound(void)
@@ -218,19 +252,26 @@ static int PD_StartSound(sfxinfo_t *sfx, int channel, int vol, int sep)
 {
     mix_channel_t *ch;
     sfx_data_t *sd;
+    const uint8_t *lump;
 
     if (!sound_initialized || channel < 0 || channel >= MIX_CHANNELS)
         return -1;
 
     sd = LoadSfx(sfx);
-    if (sd == NULL)
+    if (sd == NULL || sd->length == 0)
         return -1;
 
     ch = &mix_channels[channel];
     ch->active = 0;
     __sync_synchronize();
+    ReleaseChannel(ch);
 
-    ch->data = sd->data;
+    // Pinned until the channel stops or runs out (see PD_SoundIsPlaying).
+    lump = W_CacheLumpNum(sd->lumpnum, PU_STATIC);
+    sd->pins++;
+    ch->pinned = sd;
+
+    ch->data = lump + 8 + 16;
     ch->length = sd->length;
     ch->pos = 0;
     ch->step = (uint32_t)(((uint64_t)sd->rate << 16) / OUT_RATE);
@@ -244,15 +285,28 @@ static int PD_StartSound(sfxinfo_t *sfx, int channel, int vol, int sep)
 static void PD_StopSound(int channel)
 {
     if (channel >= 0 && channel < MIX_CHANNELS)
+    {
         mix_channels[channel].active = 0;
+        __sync_synchronize();
+        ReleaseChannel(&mix_channels[channel]);
+    }
 }
 
+// Doom polls every channel it thinks is busy each tic, and drops the ones that
+// report finished without calling PD_StopSound, so a sound that ran to its
+// end is released here.
 static boolean PD_SoundIsPlaying(int channel)
 {
+    mix_channel_t *ch;
+
     if (channel < 0 || channel >= MIX_CHANNELS)
         return false;
 
-    return mix_channels[channel].active != 0;
+    ch = &mix_channels[channel];
+    if (ch->active)
+        return true;
+    ReleaseChannel(ch);
+    return false;
 }
 
 static snddevice_t sound_devices[] = {SNDDEVICE_SB, SNDDEVICE_PAS, SNDDEVICE_GUS,

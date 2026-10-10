@@ -29,6 +29,19 @@ echo "Copying $PDX ..."
 rm -rf "$VOL/Games/$PDX"
 cp -RX "$PDX" "$VOL/Games/$PDX"
 sync
+
+# macOS writes a "._name" AppleDouble sidecar next to every file it copies to a
+# FAT volume; they are junk to the Playdate (the game skips them, no IWAD header).
+find "$VOL/Games/$PDX" -name '._*' -delete
+sync
+
+# Every file (WADs, music, ...) must be on the device with the same size.
+listing() { (cd "$1" && find . -type f ! -name '.DS_Store' ! -name '._*' -exec stat -f '%z %N' {} + | sort); }
+if ! diff <(listing "$PDX") <(listing "$VOL/Games/$PDX"); then
+  echo "Copy to $VOL/Games/$PDX is incomplete (differences above; '<' = local, '>' = device)."
+  exit 1
+fi
+echo "Verified $(listing "$PDX" | wc -l | xargs) files."
 diskutil eject "$VOL"
 
 echo "Launching ..."

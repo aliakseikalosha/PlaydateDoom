@@ -76,6 +76,7 @@ enum
 static char wad_names[MAX_WADS][WAD_NAME_LEN];
 static int wad_count;
 static int wad_selected;
+static int wad_returned; // back from a game: show the picker even for one WAD
 static uint8_t *wad_cover[MAX_WADS];
 static uint8_t wad_cover_state[MAX_WADS];
 static char wad_path[WAD_NAME_LEN + sizeof(WAD_DIR)];
@@ -631,7 +632,7 @@ int dgpd_wad_Update(void)
         dgpd_wad_DrawMessage("No WAD found in wad folder");
         return 0;
     }
-    if (wad_count == 1)
+    if (wad_count == 1 && !wad_returned)
         return 1;
 
     if (!bayer_ready)
@@ -670,6 +671,25 @@ int dgpd_wad_Update(void)
         flow_dirty = 0;
     }
     return 0;
+}
+
+void dgpd_wad_Return(const char *name)
+{
+    int i;
+
+    wad_returned = 1;
+    for (i = 0; i < wad_count; ++i)
+        if (strcmp(wad_names[i], name) == 0)
+        {
+            wad_selected = i;
+            flow_pos = (float)i;
+            break;
+        }
+}
+
+const char *dgpd_wad_Name(void)
+{
+    return wad_names[wad_selected];
 }
 
 const char *dgpd_wad_Path(void)

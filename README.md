@@ -24,17 +24,19 @@ runs on the device and in the simulator. Edit `scripts/release-wads.txt` to chan
 Copy one or more WADs into `Source/wad/` **before building** (pdc bundles them into the .pdx).
 Any `*.wad` file works (standard names like `doom1.wad`/`doom2.wad` or your own); Doom detects E1M1 (Doom 1) vs MAP01 (Doom 2) games by contents. Heretic/Hexen/Strife/`voices.wad` are skipped as unsupported. Each WAD adds to the .pdx size, so bundle only what you want.
 With more than one present, a Cover Flow "Select WAD" screen appears at start (D-pad or crank to browse, A to start; each cover is the WAD's own title picture); with one it boots straight in.
+Quitting from Doom's menu (**Quit Game**, then A) restarts the game back into the Select WAD screen, on the WAD you just played (Doom keeps all its state in globals, so it can't be started twice in one run; the picker is also shown after a quit when there is only one WAD). The restart passes `wad=<file>` as the launch argument.
 
 ## Controls
 
-| Input | Gameplay | Menus / intermission |
-|---|---|---|
-| D-pad up/down | forward / back | move |
-| D-pad left/right | turn (crank extended: strafe) | change value |
-| Crank | turn | – |
-| A | fire | Enter (Yes on prompts) |
-| B | use / open (on release) | Back (No on prompts) |
-| Hold B + left/right | previous / next weapon | – |
+| Input | Gameplay (crank docked) | Gameplay, crank extended | Menus / intermission |
+|---|---|---|---|
+| D-pad up/down | forward / back | forward / back | move |
+| D-pad left/right | turn | strafe | change value |
+| Crank | – | turn | – |
+| A | fire | fire | Enter (Yes on prompts) |
+| B | use / open (on release) | use / open (on release) | Back (No on prompts) |
+| Hold B + left/right | previous / next weapon | previous / next weapon | – |
+| (automatic) | – | fires while a monster is in front of you (Options > Auto Fire, on by default; A still fires manually) | – |
 
 System menu: **Doom menu** (Esc), **Automap** (Tab). Music/sfx volume are in Doom's own Options > Sound Volume. (Always-run is permanently on.)
 
@@ -42,7 +44,7 @@ System menu: **Doom menu** (Esc), **Automap** (Tab). Music/sfx volume are in Doo
 
 - 320x240 frame is ordered-dithered to 1-bit and centred on the 400x240 screen (fills the full height; only side bars remain).
 - Zone heap is 4 MiB and low detail is the default (`CMakeLists.txt`) to fit/run on device.
-- Sound effects are mixed in software (`src/i_playdate_sound.c`). Music is pre-rendered at build time: `tools/musrender.c` renders every music lump (MUS/MIDI) in `Source/wad/*.wad` with a small built-in synth to IMA-ADPCM WAVs in `Source/music/` (named by a hash of the lump, cached between builds), pdc converts them to `.pda`, and the game streams them with a `FilePlayer` (`src/i_playdate_sound.c`). Config (`.cfg`) is not loaded/saved; savegames go to the game's Data folder, one subfolder per WAD (`.savegame/doom1/`, `.savegame/doom2/`, ...).
+- Sound effects are mixed in software (`src/i_playdate_sound.c`). Their sample data stays purgeable in Doom's zone heap and is only pinned while a channel is playing it: Freedoom's effects total 1.4-2.5 MB (Doom's: 0.5 MB), and keeping every effect ever played resident left too little of the 4 MiB zone for Freedoom's much bigger levels (`Z_Malloc: failed on allocation`). Music is pre-rendered at build time: `tools/musrender.c` renders every music lump (MUS/MIDI) in `Source/wad/*.wad` with a small built-in synth to IMA-ADPCM WAVs in `Source/music/` (named by a hash of the lump, cached between builds), pdc converts them to `.pda`, and the game streams them with a `FilePlayer` (`src/i_playdate_sound.c`). Config (`.cfg`) is not loaded/saved; savegames go to the game's Data folder, one subfolder per WAD (`.savegame/doom1/`, `.savegame/doom2/`, ...).
 - Patches to upstream doomgeneric are small: `i_system.c` (RAM sizes overridable), `m_config.c` (savegame folder per WAD),
   `m_menu.c` (default detail overridable), `g_game.c` (mouse motion accumulates so the
   crank isn't dropped between tics), `doomgeneric.c` (screen buffer sized by `pixel_t`),
